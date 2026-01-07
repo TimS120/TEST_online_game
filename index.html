@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Two-Player Number Guess</title>
+    <style>
+      :root {
+        --bg: #0f172a;
+        --panel: #111827;
+        --text: #e5e7eb;
+        --muted: #9ca3af;
+        --accent: #22c55e;
+        --warn: #f97316;
+        --border: #1f2937;
+      }
+      body {
+        margin: 0;
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        background: radial-gradient(1000px 400px at 10% 0%, #1f2937, #0f172a);
+        color: var(--text);
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+      }
+      .app {
+        width: min(760px, 100%);
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 24px;
+        box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 24px;
+      }
+      p {
+        margin: 0 0 20px;
+        color: var(--muted);
+      }
+      .row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-bottom: 16px;
+      }
+      input,
+      button {
+        padding: 10px 12px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: #0b1220;
+        color: var(--text);
+        font-size: 14px;
+      }
+      button {
+        background: #1f2937;
+        cursor: pointer;
+      }
+      button.primary {
+        background: var(--accent);
+        color: #0b1220;
+        border: none;
+        font-weight: 600;
+      }
+      button.warn {
+        background: var(--warn);
+        color: #0b1220;
+        border: none;
+        font-weight: 600;
+      }
+      .panel {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 16px;
+        margin-bottom: 16px;
+      }
+      .log {
+        height: 200px;
+        overflow-y: auto;
+        background: #0b1220;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 12px;
+        font-family: "Courier New", Courier, monospace;
+        font-size: 13px;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .hidden {
+        display: none;
+      }
+      @media (max-width: 640px) {
+        .row {
+          flex-direction: column;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <h1>Two-Player Number Guess</h1>
+      <p>Host creates a room and sets a secret. Joiner guesses.</p>
+
+      <div class="panel">
+        <div class="row">
+          <button id="createRoomBtn" class="primary">Create room</button>
+          <input id="roomIdInput" placeholder="Room ID to join" />
+          <button id="joinRoomBtn">Join room</button>
+        </div>
+        <div class="row hidden" id="hostControls">
+          <input id="secretInput" placeholder="Secret number (host only)" type="number" />
+          <button id="setSecretBtn" class="warn">Set secret</button>
+        </div>
+        <div class="row hidden" id="joinerControls">
+          <input id="guessInput" placeholder="Your guess" type="number" />
+          <button id="guessBtn" class="primary">Send guess</button>
+        </div>
+        <div class="row">
+          <span class="muted">Status: </span>
+          <span id="statusText">Disconnected</span>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="log" id="log"></div>
+      </div>
+    </div>
+
+    <script>
+      const createRoomBtn = document.getElementById("createRoomBtn");
+      const joinRoomBtn = document.getElementById("joinRoomBtn");
+      const roomIdInput = document.getElementById("roomIdInput");
+      const hostControls = document.getElementById("hostControls");
+      const joinerControls = document.getElementById("joinerControls");
+      const secretInput = document.getElementById("secretInput");
+      const setSecretBtn = document.getElementById("setSecretBtn");
+      const guessInput = document.getElementById("guessInput");
+      const guessBtn = document.getElementById("guessBtn");
+      const statusText = document.getElementById("statusText");
+      const logEl = document.getElementById("log");
+
+      let ws = null;
+      let role = null;
+      let roomId = null;
+
+      function log(message) {
+        const line = document.createElement("div");
+        line.textContent = message;
+        logEl.appendChild(line);
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      function setStatus(message) {
+        statusText.textContent = message;
+      }
+
+      function connectWs() {
+        const protocol = location.protocol === "https:" ? "wss" : "ws";
+        ws = new WebSocket(`${protocol}://${location.host}/ws`);
+
+        ws.onopen = () => setStatus("Connected");
+        ws.onclose = () => {
+          setStatus("Disconnected");
+          log("Socket closed.");
+        };
+        ws.onerror = () => log("Socket error.");
+        ws.onmessage = (event) => handleMessage(event.data);
+      }
+
+      function handleMessage(raw) {
+        let msg;
+        try {
+          msg = JSON.parse(raw);
+        } catch {
+          log("Bad server message.");
+          return;
+        }
+
+        if (msg.type === "room_created") {
+          roomId = msg.room_id;
+          role = "host";
+          roomIdInput.value = roomId;
+          hostControls.classList.remove("hidden");
+          joinerControls.classList.add("hidden");
+          log(`Room created: ${roomId}`);
+          return;
+        }
+
+        if (msg.type === "room_joined") {
+          roomId = msg.room_id;
+          role = "joiner";
+          hostControls.classList.add("hidden");
+          joinerControls.classList.remove("hidden");
+          log(`Joined room: ${roomId}`);
+          return;
+        }
+
+        if (msg.type === "guess_result") {
+          log(`Result: ${msg.result} (guess #${msg.guesses})`);
+          if (msg.result === "correct") {
+            log("You win!");
+          }
+          return;
+        }
+
+        if (msg.type === "status") {
+          log(msg.message);
+          return;
+        }
+
+        if (msg.type === "error") {
+          log(`Error: ${msg.message}`);
+          return;
+        }
+      }
+
+      createRoomBtn.addEventListener("click", () => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          connectWs();
+          ws.addEventListener(
+            "open",
+            () => ws.send(JSON.stringify({ type: "create_room" })),
+            { once: true }
+          );
+        } else {
+          ws.send(JSON.stringify({ type: "create_room" }));
+        }
+      });
+
+      joinRoomBtn.addEventListener("click", () => {
+        const desiredRoom = roomIdInput.value.trim();
+        if (!desiredRoom) {
+          log("Enter a room ID to join.");
+          return;
+        }
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          connectWs();
+          ws.addEventListener(
+            "open",
+            () => ws.send(JSON.stringify({ type: "join_room", room_id: desiredRoom })),
+            { once: true }
+          );
+        } else {
+          ws.send(JSON.stringify({ type: "join_room", room_id: desiredRoom }));
+        }
+      });
+
+      setSecretBtn.addEventListener("click", () => {
+        if (role !== "host") {
+          log("Only the host can set the secret.");
+          return;
+        }
+        const value = secretInput.value.trim();
+        if (!value) {
+          log("Enter a secret number.");
+          return;
+        }
+        ws.send(JSON.stringify({ type: "set_secret", secret: value }));
+      });
+
+      guessBtn.addEventListener("click", () => {
+        if (role !== "joiner") {
+          log("Only the joiner can guess.");
+          return;
+        }
+        const value = guessInput.value.trim();
+        if (!value) {
+          log("Enter a guess.");
+          return;
+        }
+        ws.send(JSON.stringify({ type: "guess", guess: value }));
+      });
+    </script>
+  </body>
+</html>
