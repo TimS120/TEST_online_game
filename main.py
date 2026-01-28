@@ -1,13 +1,23 @@
 import asyncio
 import json
 import secrets
+import time
+from collections import deque
+from contextlib import asynccontextmanager
+import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Deque, Dict, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    asyncio.create_task(_cleanup_rooms())
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_PATH = BASE_DIR / "index.html"
@@ -18,10 +28,17 @@ rooms: Dict[str, Dict[str, Any]] = {}
 MAX_ROOMS = 1000
 MIN_NUMBER = 1
 MAX_NUMBER = 1_000_000
+ROOM_ID_BYTES = 16
+ROOM_TTL_SECONDS = 60 * 60
+ROOM_IDLE_GRACE_SECONDS = 15 * 60
+MAX_MESSAGE_BYTES = 4096
+MAX_GUESSES_PER_SECOND = 10
+MAX_MESSAGES_PER_SECOND = 20
+ALLOWED_ORIGINS = {origin.strip() for origin in os.getenv("ALLOWED_ORIGINS", "").split(",") if origin.strip()}
 
 
 def _new_room_id() -> str:
-    return secrets.token_urlsafe(4)
+    return secrets.token_urlsafe(ROOM_ID_BYTES)
 
 
 async def _safe_send(ws: WebSocket, message: Dict[str, Any]) -> None:
@@ -42,6 +59,47 @@ def _require_int(value: Any) -> Optional[int]:
     return None
 
 
+def _now() -> float:
+    return time.time()
+
+
+def _is_room_expired(room: Dict[str, Any], now: float) -> bool:
+    created_at = room.get("created_at", now)
+    last_activity = room.get("last_activity", created_at)
+    if now - created_at >= ROOM_TTL_SECONDS:
+        return True
+    if room.get("host") is None and room.get("joiner") is None and now - last_activity >= ROOM_IDLE_GRACE_SECONDS:
+        return True
+    return False
+
+
+def _allow_origin(ws: WebSocket) -> bool:
+    if not ALLOWED_ORIGINS:
+        return True
+    origin = ws.headers.get("origin")
+    return origin in ALLOWED_ORIGINS
+
+
+def _rate_ok(timestamps: Deque[float], limit_per_second: int, now: float) -> bool:
+    cutoff = now - 1.0
+    while timestamps and timestamps[0] < cutoff:
+        timestamps.popleft()
+    if len(timestamps) >= limit_per_second:
+        return False
+    timestamps.append(now)
+    return True
+
+
+async def _cleanup_rooms() -> None:
+    while True:
+        await asyncio.sleep(30)
+        now = _now()
+        async with rooms_lock:
+            expired = [room_id for room_id, room in rooms.items() if _is_room_expired(room, now)]
+            for room_id in expired:
+                rooms.pop(room_id, None)
+
+
 @app.get("/")
 async def index() -> HTMLResponse:
     return HTMLResponse(INDEX_PATH.read_text(encoding="utf-8"))
@@ -49,13 +107,26 @@ async def index() -> HTMLResponse:
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket) -> None:
+    if not _allow_origin(ws):
+        await ws.accept()
+        await ws.close(code=1008)
+        return
     await ws.accept()
     role = None
     room_id = None
+    message_timestamps: Deque[float] = deque()
+    guess_timestamps: Deque[float] = deque()
 
     try:
         while True:
             raw = await ws.receive_text()
+            if len(raw.encode("utf-8")) > MAX_MESSAGE_BYTES:
+                await _safe_send(ws, {"type": "error", "message": "Message too large."})
+                continue
+            now = _now()
+            if not _rate_ok(message_timestamps, MAX_MESSAGES_PER_SECOND, now):
+                await _safe_send(ws, {"type": "error", "message": "Too many messages."})
+                continue
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
@@ -80,6 +151,8 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                             "joiner": None,
                             "secret": None,
                             "guesses": 0,
+                            "created_at": _now(),
+                            "last_activity": _now(),
                         }
                     role = "host"
                     await _safe_send(ws, {"type": "room_created", "room_id": room_id})
@@ -99,6 +172,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                             await _safe_send(ws, {"type": "error", "message": "Room already has a joiner."})
                             continue
                         room["joiner"] = ws
+                        room["last_activity"] = _now()
                     role = "joiner"
                     await _safe_send(ws, {"type": "room_joined", "room_id": room_id, "role": "joiner"})
                     await _safe_send(rooms[room_id]["host"], {"type": "status", "message": "Joiner connected."})
@@ -125,6 +199,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                             continue
                         rooms[room_id]["secret"] = secret
                         rooms[room_id]["guesses"] = 0
+                        rooms[room_id]["last_activity"] = _now()
                     await _safe_send(ws, {"type": "status", "message": "Secret set. Waiting for guesses."})
                     continue
 
@@ -133,6 +208,10 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 
             if role == "joiner":
                 if msg_type == "guess":
+                    now = _now()
+                    if not _rate_ok(guess_timestamps, MAX_GUESSES_PER_SECOND, now):
+                        await _safe_send(ws, {"type": "error", "message": "Too many guesses."})
+                        continue
                     guess = _require_int(msg.get("guess"))
                     if guess is None or guess < MIN_NUMBER or guess > MAX_NUMBER:
                         await _safe_send(
@@ -154,6 +233,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                         room["guesses"] += 1
                         secret = room["secret"]
                         guesses = room["guesses"]
+                        room["last_activity"] = _now()
                     if guess < secret:
                         result = "higher"
                     elif guess > secret:
