@@ -3,8 +3,8 @@ Minimal two-player number guessing game (FastAPI + WebSockets).
 
 ## How to join as the second player
 1) Open the site in a second browser tab or a different device.
-2) Enter the Room ID shown by the host.
-3) Click "Join room".
+2) Use the invite link the host copied (it auto-joins), or enter the Room ID shown by the host.
+3) Click "Join room" if you did not use the invite link.
 4) Enter guesses and click "Send guess".
 
 ## Walkthrough (local)

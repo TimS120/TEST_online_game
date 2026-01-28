@@ -112,6 +112,10 @@
           <input id="roomIdInput" placeholder="Room ID to join" />
           <button id="joinRoomBtn">Join room</button>
         </div>
+        <div class="row hidden" id="inviteRow">
+          <input id="inviteLinkInput" readonly placeholder="Invite link appears here" />
+          <button id="copyInviteBtn">Copy invite link</button>
+        </div>
         <div class="row hidden" id="hostControls">
           <input id="secretInput" placeholder="Secret number (host only)" type="number" />
           <button id="setSecretBtn" class="warn">Set secret</button>
@@ -135,6 +139,9 @@
       const createRoomBtn = document.getElementById("createRoomBtn");
       const joinRoomBtn = document.getElementById("joinRoomBtn");
       const roomIdInput = document.getElementById("roomIdInput");
+      const inviteRow = document.getElementById("inviteRow");
+      const inviteLinkInput = document.getElementById("inviteLinkInput");
+      const copyInviteBtn = document.getElementById("copyInviteBtn");
       const hostControls = document.getElementById("hostControls");
       const joinerControls = document.getElementById("joinerControls");
       const secretInput = document.getElementById("secretInput");
@@ -157,6 +164,12 @@
 
       function setStatus(message) {
         statusText.textContent = message;
+      }
+
+      function setInviteLink(id) {
+        const inviteUrl = `${location.origin}${location.pathname}?room=${encodeURIComponent(id)}`;
+        inviteLinkInput.value = inviteUrl;
+        inviteRow.classList.remove("hidden");
       }
 
       function connectWs() {
@@ -185,6 +198,7 @@
           roomId = msg.room_id;
           role = "host";
           roomIdInput.value = roomId;
+          setInviteLink(roomId);
           hostControls.classList.remove("hidden");
           joinerControls.classList.add("hidden");
           log(`Room created: ${roomId}`);
@@ -194,6 +208,7 @@
         if (msg.type === "room_joined") {
           roomId = msg.room_id;
           role = "joiner";
+          inviteRow.classList.add("hidden");
           hostControls.classList.add("hidden");
           joinerControls.classList.remove("hidden");
           log(`Joined room: ${roomId}`);
@@ -250,6 +265,26 @@
         }
       });
 
+      copyInviteBtn.addEventListener("click", async () => {
+        const value = inviteLinkInput.value.trim();
+        if (!value) {
+          log("Create a room first to generate an invite link.");
+          return;
+        }
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(value);
+            log("Invite link copied.");
+            return;
+          }
+          throw new Error("clipboard-unavailable");
+        } catch {
+          inviteLinkInput.focus();
+          inviteLinkInput.select();
+          log("Invite link selected. Press Ctrl+C to copy.");
+        }
+      });
+
       setSecretBtn.addEventListener("click", () => {
         if (role !== "host") {
           log("Only the host can set the secret.");
@@ -275,6 +310,23 @@
         }
         ws.send(JSON.stringify({ type: "guess", guess: value }));
       });
+
+      const params = new URLSearchParams(location.search);
+      const inviteRoom = params.get("room");
+      if (inviteRoom) {
+        roomIdInput.value = inviteRoom;
+        log(`Invite detected for room: ${inviteRoom}`);
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          connectWs();
+          ws.addEventListener(
+            "open",
+            () => ws.send(JSON.stringify({ type: "join_room", room_id: inviteRoom })),
+            { once: true }
+          );
+        } else {
+          ws.send(JSON.stringify({ type: "join_room", room_id: inviteRoom }));
+        }
+      }
     </script>
   </body>
 </html>
